@@ -1,20 +1,31 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, flash
 import pickle
 import numpy as np
 from tensorflow import keras
 import re
-from newspaper import Article
+from newspaper import Article, Config
+import requests
+from bs4 import BeautifulSoup
 from tensorflow.keras.preprocessing.text import text_to_word_sequence
+import logging
 
 app = Flask(__name__)
+app.secret_key = 'phantom'
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Konfigurasi User-Agent
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 
 # Load model dan resources
-model = keras.models.load_model('bilstm_cnn_ner.keras')
+model = keras.models.load_model('bilstm_cnn_ner (2).keras')
 
-with open('word_vocab.pkl', 'rb') as f:
+with open('word_vocab (2).pkl', 'rb') as f:
     word_vocab = pickle.load(f)
 
-with open('label_vocab.pkl', 'rb') as f:
+with open('label_vocab (2).pkl', 'rb') as f:
     label_vocab = pickle.load(f)
 
 # Reverse label vocabulary
@@ -84,6 +95,55 @@ def predict_entities(text, max_seq_len=512):
         for token, label_idx in zip(tokens, predicted_labels[:len(tokens)])
     ]
 
+def extract_with_newspaper(url):
+    """Ekstrak konten menggunakan newspaper3k"""
+    try:
+        config = Config()
+        config.browser_user_agent = USER_AGENT
+        config.request_timeout = 10
+        config.memoize_articles = False
+        
+        article = Article(url, config=config)
+        article.download()
+        article.parse()
+        return article.text
+    except Exception as e:
+        logger.error(f"Newspaper error: {str(e)}")
+        return None
+
+def extract_with_bs4(url):
+    """Ekstrak konten menggunakan BeautifulSoup sebagai fallback"""
+    try:
+        headers = {'User-Agent': USER_AGENT}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Heuristik sederhana untuk menemukan konten artikel
+        # 1. Coba temukan tag <article>
+        article = soup.find('article')
+        if article:
+            return article.get_text(separator='\n', strip=True)
+        
+        # 2. Coba temukan div dengan class yang umum untuk konten
+        common_content_classes = ['content', 'article-content', 'post-content', 
+                                'entry-content', 'main-content', 'story-content']
+        for class_name in common_content_classes:
+            content_div = soup.find('div', class_=class_name)
+            if content_div:
+                return content_div.get_text(separator='\n', strip=True)
+        
+        # 3. Gabungkan semua paragraf sebagai fallback terakhir
+        paragraphs = soup.find_all('p')
+        if paragraphs:
+            return '\n'.join(p.get_text(strip=True) for p in paragraphs)
+            
+        return None
+    except Exception as e:
+        logger.error(f"BeautifulSoup error: {str(e)}")
+        return None
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     entities = None
@@ -96,12 +156,26 @@ def index():
         
         if action == 'scrap' and url:
             try:
-                article = Article(url)
-                article.download()
-                article.parse()
-                scraped_text = article.text
+                # Coba ekstrak dengan newspaper3k terlebih dahulu
+                scraped_text = extract_with_newspaper(url)
+                
+                # Jika newspaper3k gagal, coba dengan BeautifulSoup
+                if not scraped_text or not scraped_text.strip():
+                    scraped_text = extract_with_bs4(url)
+                
+                if not scraped_text or not scraped_text.strip():
+                    flash('Tidak dapat mengambil konten dari URL tersebut. Mungkin konten dilindungi atau format tidak didukung.', 'danger')
+                else:
+                    # Perbaikan sintaks untuk membersihkan teks
+                    if scraped_text:
+                        scraped_text = '\n'.join(line.strip() for line in scraped_text.split('\n'))
+                    else:
+                        scraped_text = ''
+                    
             except Exception as e:
-                scraped_text = f"Error scraping URL: {str(e)}"
+                logger.error(f"Scraping error: {str(e)}")
+                flash(f"Error saat mengambil konten: {str(e)}", 'danger')
+                scraped_text = ''
                 
         elif action == 'detect':
             text = request.form.get('text', '')
@@ -118,26 +192,36 @@ def index():
                     if label == 'O':
                         if current_entity:
                             entity_type = current_label.split('-')[-1] if '-' in current_label else current_label
-                            entity_dict.setdefault(entity_type, []).append(' '.join(current_entity))
+                            entity_text = ' '.join(current_entity)
+                            
+                            if entity_type not in entity_dict or entity_text not in entity_dict[entity_type]:
+                                entity_dict.setdefault(entity_type, []).append(entity_text)
+                                
                             current_entity = []
                             current_label = None
                     else:
                         if '-' in label:
                             prefix, entity_type = label.split('-', 1)
                         else:
-                            prefix, entity_type = 'B', label  # Default prefix jika tidak ada tanda '-'
+                            prefix, entity_type = 'B', label
                         
-                        if current_label == entity_type:
-                            current_entity.append(token)
-                        else:
+                        if prefix == 'B' or current_label != entity_type:
                             if current_entity:
-                                entity_dict.setdefault(current_label, []).append(' '.join(current_entity))
+                                entity_text = ' '.join(current_entity)
+                                
+                                if current_label not in entity_dict or entity_text not in entity_dict[current_label]:
+                                    entity_dict.setdefault(current_label, []).append(entity_text)
+                                    
                             current_entity = [token]
                             current_label = entity_type
+                        else:
+                            current_entity.append(token)
                 
-                # Handle last entity
                 if current_entity:
-                    entity_dict.setdefault(current_label, []).append(' '.join(current_entity))
+                    entity_text = ' '.join(current_entity)
+                    
+                    if current_label not in entity_dict or entity_text not in entity_dict[current_label]:
+                        entity_dict.setdefault(current_label, []).append(entity_text)
                 
                 entities = entity_dict
                 scraped_text = text

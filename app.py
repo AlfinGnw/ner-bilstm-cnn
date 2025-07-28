@@ -3,25 +3,53 @@ import pickle
 import numpy as np
 from tensorflow import keras
 import re
-from newspaper import Article
+from newspaper import Article, Config
+import requests
+from bs4 import BeautifulSoup
 from tensorflow.keras.preprocessing.text import text_to_word_sequence
+import logging
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'  # Needed for flash messages
+app.secret_key = 'phantom'
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Konfigurasi User-Agent
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+
+# Konfigurasi Selenium
+SELENIUM_OPTIONS = Options()
+SELENIUM_OPTIONS.add_argument(f'user-agent={USER_AGENT}')
+SELENIUM_OPTIONS.add_argument('--headless')
+SELENIUM_OPTIONS.add_argument('--disable-gpu')
+SELENIUM_OPTIONS.add_argument('--no-sandbox')
+SELENIUM_OPTIONS.add_argument('--disable-dev-shm-usage')
+
+# Path ke ChromeDriver 
+CHROME_DRIVER_PATH = '/path/to/chromedriver.exe'
 
 # Load model dan resources
-model = keras.models.load_model('bilstm_cnn_ner(1).keras')
+model = keras.models.load_model('bilstm_cnn_ner.keras')
 
-with open('word_vocab(1).pkl', 'rb') as f:
+with open('word_vocab (2).pkl', 'rb') as f:
     word_vocab = pickle.load(f)
 
-with open('label_vocab(1).pkl', 'rb') as f:
+with open('label_vocab (2).pkl', 'rb') as f:
     label_vocab = pickle.load(f)
 
 # Reverse label vocabulary
 index_to_label = {v: k for k, v in label_vocab.items()}
 
-# Fungsi normalisasi (sama seperti model)
+# Fungsi normalisasi
 def normalize_text(text):
     text = text.lower()
     text = normalize_dates(text)
@@ -50,7 +78,7 @@ def normalize_dates(text):
     # Format 'yyyy-mm-dd'
     text = re.sub(r'\b(\d{4})-(\d{2})-(\d{2})\b', r'\3/\2/\1', text)
 
-    # Format 'dd/mm/yyyy' atau 'dd/mm/yy'
+    # Format 'dd/mm/yyyy' 
     text = re.sub(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b', r'\1/\2/\3', text)
 
     # Format lain: dd-mm-yyyy, dd.mm.yyyy
@@ -58,7 +86,7 @@ def normalize_dates(text):
 
     return text
 
-# Fungsi tokenisasi dengan TensorFlow (sama seperti model)
+# Fungsi tokenisasi 
 def tokenize(text):
     return text_to_word_sequence(text, filters='!"#$%&()*+,-.:;<=>?@[\\]^_`{|}~\t\n')
 
@@ -85,6 +113,125 @@ def predict_entities(text, max_seq_len=512):
         for token, label_idx in zip(tokens, predicted_labels[:len(tokens)])
     ]
 
+def extract_with_newspaper(url):
+    """Ekstrak konten menggunakan newspaper3k"""
+    try:
+        config = Config()
+        config.browser_user_agent = USER_AGENT
+        config.request_timeout = 10
+        config.memoize_articles = False
+        
+        article = Article(url, config=config)
+        article.download()
+        article.parse()
+        return article.text
+    except Exception as e:
+        logger.error(f"Newspaper error: {str(e)}")
+        return None
+
+def extract_with_selenium(url):
+    """Ekstrak konten menggunakan Selenium untuk website JavaScript"""
+    try:
+        # Inisialisasi WebDriver
+        service = Service(CHROME_DRIVER_PATH)
+        driver = webdriver.Chrome(service=service, options=SELENIUM_OPTIONS)
+        
+        driver.get(url)
+        
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+        
+        
+        time.sleep(2)
+        
+       
+        html = driver.page_source
+        
+        
+        driver.quit()
+        
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        
+        # 1. Coba tag <article>
+        article = soup.find('article')
+        if article:
+            return article.get_text(separator='\n', strip=True)
+        
+        # 2. Coba div 
+        common_content_classes = ['content', 'article-content', 'post-content', 
+                                'entry-content', 'main-content', 'story-content']
+        for class_name in common_content_classes:
+            content_div = soup.find('div', class_=class_name)
+            if content_div:
+                return content_div.get_text(separator='\n', strip=True)
+        
+        # 3. Gabungkan paragraf
+        paragraphs = soup.find_all('p')
+        if paragraphs:
+            return '\n'.join(p.get_text(strip=True) for p in paragraphs)
+            
+    
+        return soup.get_text(separator='\n', strip=True)
+        
+    except Exception as e:
+        logger.error(f"Selenium error: {str(e)}")
+        return None
+
+def extract_with_bs4(url):
+    """Ekstrak konten menggunakan BeautifulSoup sebagai fallback"""
+    try:
+        headers = {'User-Agent': USER_AGENT}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        
+        # 1. Coba tag
+        article = soup.find('article')
+        if article:
+            return article.get_text(separator='\n', strip=True)
+        
+        # 2. Coba  div 
+        common_content_classes = ['content', 'article-content', 'post-content', 
+                                'entry-content', 'main-content', 'story-content']
+        for class_name in common_content_classes:
+            content_div = soup.find('div', class_=class_name)
+            if content_div:
+                return content_div.get_text(separator='\n', strip=True)
+        
+       
+        paragraphs = soup.find_all('p')
+        if paragraphs:
+            return '\n'.join(p.get_text(strip=True) for p in paragraphs)
+            
+        return None
+    except Exception as e:
+        logger.error(f"BeautifulSoup error: {str(e)}")
+        return None
+
+def extract_content(url):
+    """Strategi hybrid untuk ekstraksi konten"""
+   
+    text = extract_with_newspaper(url)
+    if text and text.strip():
+        return text
+    
+   
+    text = extract_with_bs4(url)
+    if text and text.strip():
+        return text
+    
+    
+    text = extract_with_selenium(url)
+    if text and text.strip():
+        return text
+    
+    return None
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     entities = None
@@ -97,16 +244,21 @@ def index():
         
         if action == 'scrap' and url:
             try:
-                article = Article(url)
-                article.download()
-                article.parse()
-                scraped_text = article.text
+                # Gunakan strategi hybrid untuk ekstraksi konten
+                scraped_text = extract_content(url)
                 
-                if not scraped_text:
-                    flash('Tidak dapat mengambil konten dari URL tersebut. Konten kosong.', 'danger')
+                if not scraped_text or not scraped_text.strip():
+                    flash('Tidak dapat mengambil konten dari URL tersebut. Mungkin konten dilindungi atau format tidak didukung.', 'danger')
+                else:
+                    
+                    if scraped_text:
+                        scraped_text = '\n'.join(line.strip() for line in scraped_text.split('\n'))
+                    else:
+                        scraped_text = ''
                     
             except Exception as e:
-                flash(f"Error scraping URL: {str(e)}", 'danger')
+                logger.error(f"Scraping error: {str(e)}")
+                flash(f"Error saat mengambil konten: {str(e)}", 'danger')
                 scraped_text = ''
                 
         elif action == 'detect':
@@ -126,7 +278,6 @@ def index():
                             entity_type = current_label.split('-')[-1] if '-' in current_label else current_label
                             entity_text = ' '.join(current_entity)
                             
-                            # Hanya tambahkan jika entitas belum ada dalam daftar (menghilangkan duplikat)
                             if entity_type not in entity_dict or entity_text not in entity_dict[entity_type]:
                                 entity_dict.setdefault(entity_type, []).append(entity_text)
                                 
@@ -136,27 +287,23 @@ def index():
                         if '-' in label:
                             prefix, entity_type = label.split('-', 1)
                         else:
-                            prefix, entity_type = 'B', label  # Default prefix jika tidak ada tanda '-'
+                            prefix, entity_type = 'B', label
                         
                         if prefix == 'B' or current_label != entity_type:
-                            # Jika ada entitas yang sedang diproses, simpan dahulu
                             if current_entity:
                                 entity_text = ' '.join(current_entity)
                                 
-                                # Hanya tambahkan jika entitas belum ada dalam daftar
                                 if current_label not in entity_dict or entity_text not in entity_dict[current_label]:
                                     entity_dict.setdefault(current_label, []).append(entity_text)
                                     
                             current_entity = [token]
                             current_label = entity_type
-                        else:  # Jika prefix 'I' dan label sama, lanjutkan entitas saat ini
+                        else:
                             current_entity.append(token)
                 
-                # Handle last entity
                 if current_entity:
                     entity_text = ' '.join(current_entity)
                     
-                    # Hanya tambahkan jika entitas belum ada dalam daftar
                     if current_label not in entity_dict or entity_text not in entity_dict[current_label]:
                         entity_dict.setdefault(current_label, []).append(entity_text)
                 

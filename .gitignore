@@ -1,2 +1,7 @@
 /venv
 .gitignore
+/static
+backup.txt
+main.py
+dt.tsv
+/BestModel
