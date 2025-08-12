@@ -14,7 +14,7 @@ document.addEventListener("DOMContentLoaded", function () {
         btn.setAttribute("disabled", "disabled");
 
         puter.ai.chat(
-            `Ambil lokasi dari teks berikut. Batasi hanya sampai level kecamatan atau desa. Jangan tampilkan kabupaten, provinsi, atau negara. Format satu lokasi per baris:\n\n${teks}`,
+            `次のテキストから場所を抽出してください。抽出は町や村レベルまでに制限してください。県、市、国は表示しないでください。1行に1つの場所を記載してください。\n\n${teks}`,
             {
                 model: "gpt-4.1-nano",
                 temperature: 0.3
