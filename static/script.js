@@ -16,7 +16,7 @@ document.addEventListener("DOMContentLoaded", function () {
         puter.ai.chat(
             `Ambil lokasi dari teks berikut. Batasi hanya sampai level kecamatan atau desa. Jangan tampilkan kabupaten, provinsi, atau negara. Format satu lokasi per baris:\n\n${teks}`,
             {
-                model: "openchat/openchat-3.5",
+                model: "gpt-4.1-nano",
                 temperature: 0.3
             }
         ).then(res => {
